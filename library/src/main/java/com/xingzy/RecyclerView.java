@@ -51,21 +51,94 @@ public class RecyclerView extends ViewGroup {
         super(context, attrs, defStyleAttr);
     }
 
+    public void setAdapter(Adapter adapter) {
+        this.adapter = adapter;
+    }
+
+    @Override
+    protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        int widthSize = MeasureSpec.getSize(widthMeasureSpec);
+        int heightSize = MeasureSpec.getSize(heightMeasureSpec);
+
+        int h;
+        if (adapter != null) {
+            this.rowCount = adapter.getCount();
+            heights = new int[rowCount];
+            for (int i = 0; i < heights.length; i++) {
+                heights[i] = adapter.getHeight(i);
+            }
+        }
+
+        int tmpH = sumArray(heights, 0, heights.length);
+        h = Math.min(heightSize, tmpH);
+
+        setMeasuredDimension(widthSize, h);
+        super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+    }
+
+    /**
+     * 计算出所有item的高度和
+     *
+     * @param heights
+     * @param start
+     * @param length
+     * @return
+     */
+    private int sumArray(int[] heights, int start, int length) {
+        int sum = 0;
+        for (int i = start; i < length; i++) {
+            sum += heights[i];
+        }
+        return sum;
+    }
+
     @Override
     protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        if (needRelayout || changed) {
+            needRelayout = false;
 
+            viewList.clear();
+            removeAllViews();
+            if (adapter != null) {
+                width = r -l;
+            }
+
+
+        }
     }
 
     interface Adapter {
 
-        int getItemViewType(int row);
+        /**
+         * 获取item 的类型
+         *
+         * @param type
+         * @return item 的类型
+         */
+        int getItemViewType(int type);
 
+        /**
+         * @return item 类型数量
+         */
         int getViewTypeCount();
 
         View onCreateViewHolder(int position, View convertView, ViewGroup parent);
 
         View onBinderViewHolder(int position, View convertView, ViewGroup parent);
 
+        /**
+         * 获取所有item 高度
+         *
+         * @param index
+         * @return
+         */
         int getHeight(int index);
+
+        /**
+         * 获取item个数
+         *
+         * @return item个数
+         */
+        int getCount();
     }
 }
