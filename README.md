@@ -81,6 +81,124 @@ if (deadlineNs != FOREVER_NS&& !mRecyclerPool.willCreateInTime(type, start, dead
 mCreateRunningAverageNs就是创建同type的holder所需要的平均时间。
 
 ## 四级缓存
+![](https://github.com/RoyXing/recyclerview/blob/master/pic/%E5%9B%9B%E7%BA%A7%E7%BC%93%E5%AD%98.png)<br>
+四级缓存是rv面世之后就自带的，相比listview的二级缓存机制。rv的缓存更加的高大上<br>
+rv通过Recycler来管理缓存机制，通过tryGetViewHolderForPositionByDeadline可以找到如何使用缓存。<br>
+tryGetViewHolderForPositionByDeadline依次从各级缓存中去取viewHolder，如果取到直接丢给rv来展示，如果取不到最终才会执行onCreateViewHolder和onBindViewHolder方法。内部实现其实是如何从司机缓存中去取。<br>
+
+缓存Recycler内部类中的部分成员变量
+```Java
+ public final class Recycler {
+        final ArrayList<RecyclerView.ViewHolder> mAttachedScrap = new ArrayList();
+        ArrayList<RecyclerView.ViewHolder> mChangedScrap = null;
+        final ArrayList<RecyclerView.ViewHolder> mCachedViews = new ArrayList();
+        private final List<RecyclerView.ViewHolder> mUnmodifiableAttachedScrap;
+        private int mRequestedCacheMax;
+        int mViewCacheMax;
+        private RecyclerView.ViewCacheExtension mViewCacheExtension;
+        RecyclerView.RecycledViewPool mRecyclerPool;
+        static final int DEFAULT_CACHE_SIZE = 2;
+        ..............
+ }
+```
+其中mAttachedScrap和mChangedScrap是第一级缓存，是recycler在获取ViewHolder时最先考虑的缓存，接下来是mCachedViews，mViewCacheExtension，和mRecyclerPool分别对应2，3，4级缓存。<br>
+
+### 各级缓存的作用
+#### scrap:
+scrap使用来保存被rv移除但最近又马上要使用的缓存，比如rv中item自带的动画效果。<br>
+计算item的偏移量然后执行属性动画的过程，这中间可能就涉及到需要将动画之前的item保存下拉位置信息，动画后的item再保存下拉位置信息，然后利用这些位置数据生成相应的属性动画。如何保存这些ViewHolder,就需要使用到scrap了，因为这些ViewHolder数据上是没有发生变化的，只是位置发生改变。因此放到scrap中最合适。<br>
+
+mAttachedScrap和mChangedScrap两个成员变量保存的对象是有区别的，一般调用adapter的notifyItemRangeChanged被移除的ViewHolder会保存到mChangedScrap，其余的notify系列方法(不包括notifyDataSetChanged)移除的ViewHolder会被保存到mAttachedScrap中。<br>
+
+#### cached
+就LinearLayoutManager来说cached缓存默认大小为2，它的容量非常小，作用就是rv滑动时刚被移除屏幕的ViewHolder的收容所。<br>
+因为rv会认为刚被移出屏幕的ViewHolder可能接下来马上会使用到，所以不会立马设置为无效的ViewHolder，会将它们保存到cached中，但又不能将所有移出屏幕的ViewHolder都设为有效的ViewHolder，所有它的默认容量只有2个我们可以通过LinearLayoutManager#setViewCacheSize来设置这个容量大小:
+```Java
+public void setViewCacheSize(int viewCount) {
+    mRequestedCacheMax = viewCount;
+    updateViewCacheSize();
+}
+```
+#### extension
+第三级缓存,这是一个自定义的缓存，rv可以自定义缓存应为的，这里你可以决定缓存的保存逻辑，但是这个自定义缓存一般没有见过具体的使用场景，而且自定义缓存需要对源码非常熟悉，否则在rv执行item动画，或者执行notify的一系列方法后你的自定义缓存是否还能有效是一个值得考虑的问题。<br>
+
+所以不太推荐使用该缓存，可能是google工程师自己留着自己拓展使用的，目前还只是空实现。因此其实rv所说四级缓存本质上还只是三级缓存。<br>
+
+#### pool
+唯一一个我们开发者可以方便设置的，new一个pool传进去就可以了，其它的都不需要我们来处理。这个缓存保存的对象就是那些无效的ViewHolder，虽说无效的ViewHolder上的数据无效，但是它的rootview还是可以拿来更新数据使用，这也是为什么最早的listvie有个convertView参数的原因。<br>
+
+pool一般会和cached配合使用，cached保存不下的会被pool保存，毕竟cached的容量默认只有2，但是pool容量也是有限的，当保存满之后再有ViewHolder到来的话就只能抛弃掉。它也有一个默认的大小
+```Java
+private static final int DEFAULT_MAX_SCRAP = 5;
+int mMaxScrap = DEFAULT_MAX_SCRAP;
+```
+该大小也可以调用方法来改变，一般默认即可。<br>
+
+考虑到这么多的缓存优化才会使得rv的代码非常庞大。
+
+## 使用RecyclerView如何提高性能
+google工程师在api中提供了很多优化的api，需要我们注意合理使用
+### 降低item的布局层次
+这个方法适用于各种布局的编写，降低页面层次可以一定程度降低cpu渲染数据的时间成本，反应到rv中就是降低mCreateRunningAverageNs的时间，不仅目前显示的页面能加快速度，预取的成功率也会提升。因此降低item布局层次可以说是rv优化中一个对于rv源码不需要了解也能完全掌握的有效方式。
+
+### 去除冗余的setItemClick事件
+rv和listview的一个比较大的不同之处就是rv没有提供setItemClick方法，这也是自己在使用的时候不了解的一个问题。<br>
+
+一个简单的方式直接在onBindViewHolder中设置，这种方式其实不太可取，onBindViewHolder在item进入屏幕的时候都会被调用(cached缓存着的除外)，而一般情况下都会创建一个匿名内部类来是实现，这就会导致在rv在快速滑动的时候创建很对对象，因此从这点考虑的话setItemClick应该放到其它地方。<br>
+
+我所选取的做法就是将setItemClick事件的绑定和ViewHolder对应的rootview进行绑定，viewholder由于缓存机制的存在，它创建的个数是一定的，所以和它绑定的setItemClick对象也是一定的。<br>
+
+还有一种做法可以通过rv自带的addOnItemTouchListener来实现点击事件，原理就是rv在触摸事件中会使用到addOnItemTouchListener中设置的对象，然后配合GestureDetectorCompat实现点击item，<br>
+```Java
+recyclerView.addOnItemTouchListener(this);
+gestureDetectorCompat = new GestureDetectorCompat(recyclerView.getContext(), new SingleClick());
+
+@Override
+public boolean onInterceptTouchEvent(RecyclerView rv, MotionEvent e) {
+    if (gestureDetectorCompat != null) {
+        gestureDetectorCompat.onTouchEvent(e);
+    }
+    return false;
+}
+
+private class SingleClick extends GestureDetector.SimpleOnGestureListener {
+
+    @Override
+    public boolean onSingleTapConfirmed(MotionEvent e) {
+        View view = recyclerView.findChildViewUnder(e.getX(), e.getY());
+        if (view == null) {
+            return false;
+        }
+        final RecyclerView.ViewHolder viewHolder = recyclerView.getChildViewHolder(view);
+        if (!(viewHolder instanceof ViewHolderForRecyclerView)) {
+            return false;
+        }
+        final int position = getAdjustPosition(viewHolder);
+        if (position == invalidPosition()) {
+            return false;
+        }
+        /****************/
+        点击事件设置可以考虑放在这里
+        /****************/
+        return true;
+    }
+}
+```
+相对来说是一种比较优雅的实现，但是这种实现只能设置整个item的点击，如果item内有两个view需要点击就不太适应了，具体的使用可以根据实际情况来区分。<br>
+
+### 复用pool缓存
+复用本身并不难，调用rv的setRecycledViewPool方法设置一个pool进去就可以，但是并不是说每个使用rv场景都需要一个pool，这个复用pool是针对item中包含rv的情况才使用，
+
+
+
+
+
+
+
+
+
+
+
 
 
 
