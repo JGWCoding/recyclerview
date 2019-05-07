@@ -187,7 +187,58 @@ private class SingleClick extends GestureDetector.SimpleOnGestureListener {
 相对来说是一种比较优雅的实现，但是这种实现只能设置整个item的点击，如果item内有两个view需要点击就不太适应了，具体的使用可以根据实际情况来区分。<br>
 
 ### 复用pool缓存
-复用本身并不难，调用rv的setRecycledViewPool方法设置一个pool进去就可以，但是并不是说每个使用rv场景都需要一个pool，这个复用pool是针对item中包含rv的情况才使用，
+复用本身并不难，调用rv的setRecycledViewPool方法设置一个pool进去就可以，但是并不是说每个使用rv场景都需要一个pool，这个复用pool是针对item中包含rv的情况才适用，如果item都是普通布局就不要使用pool。<br>
+
+如果有多个item都是嵌套rv的那么复用pool就非常有必要了，在封装adapter库时需要考虑的一个点就是如何找到item中包含的rv，可以考虑的办法就是遍历item的根部局。如果找到包含rv的，那么将对该rv设置pool，所有item中的嵌套rv都使用同一个pool即可，<br>
+```Java
+private List<RecyclerView> findNestedRecyclerView(View rootView) {
+    List<RecyclerView> list = new ArrayList<>();
+    if (rootView instanceof RecyclerView) {
+        list.add((RecyclerView) rootView);
+        return list;
+    }
+    if (!(rootView instanceof ViewGroup)) {
+        return list;
+    }
+    final ViewGroup parent = (ViewGroup) rootView;
+    final int count = parent.getChildCount();
+    for (int i = 0; i < count; i++) {
+        View child = parent.getChildAt(i);
+        list.addAll(findNestedRecyclerView(child));
+    }
+    return list;
+}
+```
+得到list之后接下来的就是给里面的rv绑定pool，可以将该pool设置为adapter库中的成员变量，每次找到嵌套的rv的item时直接将该pool设置给对应的rv即可。
+关于pool源码上有一点需要在意的是，当最外层的rv滑动导致item被移除屏幕时，rv其实是通过调用removeView(view)完成的，里面的参数view就是和holder绑定的rootview。如果rootview中包含了rv，会最终调用rv的onDetachedFromWindow()；
+```Java
+@Override
+public void onDetachedFromWindow(RecyclerView view, RecyclerView.Recycler recycler) {
+    super.onDetachedFromWindow(view, recycler);
+    if (mRecycleChildrenOnDetach) {
+        removeAndRecycleAllViews(recycler);
+        recycler.clear();
+    }
+}
+```
+注意上面if语句，如果进入该分支里面的主要逻辑就是会清除掉scrap和cached缓存上的holder并将它们放置到pool中，默认情况下mRecycleChildrenOnDetach为false。这么设计的目的在于放置到pool中的holder要想被拿来使用还必须调用onBindViewHolder来重新进行数据绑定。默认为false，这也即使rv移除屏幕也不会使里面的holdr失效，下次再次进入屏幕就可以直接使用避免了onBindViewHolder操作。<br>
+
+google提供了setRecycleChildrenOnDetach允许我们改变它的值，如果想要充分使用pool的功能，最好将其置为true,因为按照一般用户习惯滑出屏幕的item一般不会回滚查看，这样接下来要被滑入的item如果存在rv的情况下就可以快速复用pool中的holder，这是使用pool复用的时候一个需要注意点的地方。<br>
+
+### 保存嵌套rv的滑动状态
+
+这里要分两种情况，一种是移除屏幕一点后就直接重新移回屏幕，另一种是移除屏幕一段距离再移回来。<br>
+
+这里我们会发现一个问题就是移出一点回来的rv会保留原来的滑动状态，而移出一大段距离后回来的rv会丢掉原先滑动的状态，造成这个现象的原因本质是rv的缓存机制，简单的来说就是刚滑动屏幕的会被放到cache中，而滑出一段距离的会被放到pool中，而从pool中取出的holder会重新进行数据绑定。没有保存滑动状态的话rv就会被重置掉。<br>
+
+在LinearlayoutManager中对应的有onSaveInstanceState和onRestoreInstanceState方法来分别处理保存状态和恢复状态，它的机制其实和activity的状态恢复类似。我们需要做的是当rv被屏幕移出屏幕调用onSaveInstanceState，移回来的时候调用onRestoreInstanceState即可。<br>
+
+需要注意的是onRestoreInstanceState需要传入一个参数parcelable，这个是onSaveInstanceState提供给我们的，parcelable里面就保存了当前的滑动位置信息，如果自己在封装adapter库的时候就需要将这个parcelable保存起来：
+```Java
+private Map<Integer, SparseArrayCompat<Parcelable>> states;
+```
+
+map中的key为item对应的position,考虑到
 
 
 
