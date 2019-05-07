@@ -238,7 +238,169 @@ google提供了setRecycleChildrenOnDetach允许我们改变它的值，如果想
 private Map<Integer, SparseArrayCompat<Parcelable>> states;
 ```
 
-map中的key为item对应的position,考虑到
+map中的key为item对应的position,考虑到一个item中可能嵌套多个rv所以value为SparseArrayCompat。<br>
+
+### 视情况设置itemAnimator动画
+
+默认在开启item动画的情况下会使rv额外处理很多的逻辑判断，notify的增删改操作都会对应相应的item动画效果，所以如果你的应用不需要这些动画效果的话可以直接关闭掉，这样可以在处理增删改操作时大大简化rv的内部逻辑处理，关闭的方法直接调用setItemAnimator(null)即可。
+
+### diffutil工具类
+diffutil是配合rv进行差异化比较的工具类，通过对比前后两个data数据集合，diffutil会自动给出一系列的notify操作，避免我们手动调用notifiy的繁琐，看一个简单的使用示例:<br>
+```Java
+data = new ArrayList<>();
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello1"));
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello2"));
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello3"));
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello4"));
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello5"));
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello6"));
+data.add(new MultiTypeItem(R.layout.testlayout1, "hello7"));
+
+newData = new ArrayList<>();
+//改
+newData.add(new MultiTypeItem(R.layout.testlayout1, "new one"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello2"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello3"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello4"));
+//增
+newData.add(new MultiTypeItem(R.layout.testlayout1, "add one"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello5"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello6"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello7"));
+```
+
+实现Callback接口
+```Java
+private class DiffCallBack extends DiffUtil.Callback {
+
+        @Override
+        public int getOldListSize() {
+            return data.size();
+        }
+
+        @Override
+        public int getNewListSize() {
+            return newData.size();
+        }
+
+        @Override
+        public boolean areItemsTheSame(int oldItemPosition, int newItemPosition) {
+            return data.get(oldItemPosition).getType() == newData.get(newItemPosition).getType();
+        }
+
+        @Override
+        public boolean areContentsTheSame(int oldItemPosition, int newItemPosition) {
+            String oldStr = (String) DiffUtilDemoActivity.this.data.get(oldItemPosition).getData();
+            String newStr = (String) DiffUtilDemoActivity.this.newData.get(newItemPosition).getData();
+            return oldStr.equals(newStr);
+        }
+    }
+```
+
+实现的方法比较容易看懂，diffutil之所以能判断两个数据集的差距就是通过调用上述方法实现，areItemsTheSame表示的就是两个数据集对应position上的itemtype是否一样，areContentsTheSame就是比较在itemtype一致的情况下item中内容是否相同，可以理解成是否需要对item进行局部刷新。实现完callback之后接下来就是如何调用了。
+```Java
+DiffUtil.DiffResult diffResult = DiffUtil.calculateDiff(new DiffCallBack(), true);
+diffResult.dispatchUpdatesTo(adapter);
+adapter.setData(newData);
+```
+上述就是diffutil一个简单的代码范例，其实最开始的时候自己想将diffutil封装到adapter库，但实际在使用后发现了几个自认为的弊端，所以放弃使用该工具类，这也可能是自己没有完全掌握diffutil精髓所导致的吧，这里就直接说下我对diffutil使用的看法。
+
+#### 弊端一：
+看示例代码应该也能察觉到，要想使用diffutil必须准备两个数据集，这就是一个比较蛋疼的事情.<br>
+原先我们只需要维护一个数据集就可以，现在就需要我们同时维护两个数据集，两个数据集都需要有一份自己的数据.<br>
+如果只是简单将数据从一个集合copy到另一个集合是可能会导致问题的，会涉及到对象的深拷贝和浅拷贝问题，你必须保证两份数据集都有各自独立的内存，否则当你修改其中一个数据集可能会造成另一个数据集同时被修改掉的情况。<br>
+#### 弊端二：
+为了实现callback接口必须实现四个方法，其中areContentsTheSame是最难实现的一个方法，因为这里涉及到对比同type的item内容是否一致，这就需要将该item对应的数据bean进行比较，怎么比较效率会高点，目前能想到的方法就是将bean转换成string通过调用equals方法进行比较，如果item的数据bean对应的成员变量很少如示例所示那倒还好，这也是网上很多推荐diffutil文章避开的问题。<br>
+但是如果bean对应的成员很多，或者成员变量含有list，里面又包含各种对象元素，想想就知道areContentsTheSame很难去实现，为了引入一个diffutil额外增加这么多的逻辑判断有点得不偿失。<br>
+#### 弊端三：
+diffutil看起来让人捉摸不透的item动画行为，以上面代码为例<br>
+```Java
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello1"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello2"));
+//        newData.add(new MultiTypeItem(R.layout.testlayout1, "hello3"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello4"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello5"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello6"));
+newData.add(new MultiTypeItem(R.layout.testlayout1, "hello7"));
+```
+新的数据集和原有数据集唯一的不同点就在于中间删除了一条数据，按照原先我们对于rv的理解，执行的表现形式应该是hello3被删除掉，然后hello3下面的所有item整体上移才对，但在使用diffutil后你会发现并不是这样的，它的表现比较怪异会移除第一条数据，这种怪异的行为应该和diffutil内部复杂的算法有关。<br>
+
+### setHasFixedSize
+主要作用就是设置固定高度的rv，避免rv重复measure调用。<br>
+这个属性配合rv的wrap_content属性来使用，比如一个垂直滚动的rv，它的height属性设置为wrap_content，最初的时候数据集只有3条数据，全部展示出来不能撑满整个屏幕，如果这是我们通过notifyItemRangeInserted增加一条数据，在设置setHasFixedSize和没有设置setHasFixedSize你会发现rv的高度是不一样的，设置的rv的高度不会改变，没有设置过的则rv会重新measure它的高度。这是setHasFixedSize变现出来的外在形式。<br>
+
+notifiy的一系列方法除了notifyDataSetChanged这种万金油的方式，还有一系列进行局部刷新的方法可供调用，而这些方法最终都会执行到一个方法
+```Java
+void triggerUpdateProcessor() {
+    if (POST_UPDATES_ON_ANIMATION && mHasFixedSize && mIsAttached) {
+        ViewCompat.postOnAnimation(RecyclerView.this, mUpdateChildViewsRunnable);
+    } else {
+        mAdapterUpdateDuringMeasure = true;
+        requestLayout();
+    }
+}
+
+```
+区别就在于当设置过setHasFixedSize会走if分支，而没有设置则进入到else分支，else分支直接会调用到requestLayout方法.<br>
+该方法会导致视图树重新进行绘制，onMeasure，onLayout最终都会被执行到，结合这点再来看为什么rv的高度属性为wrap_content时受到setHasFixedSize影响就很清楚了，根据上述源码可以得到一个优化的地方在于，当item嵌套了rv并且rv没有设置wrap_content时，可以对rv设置setHasFixedSize，这么做的一个最大的好处就是嵌套的rv不会触发requestLayout,从而不会导致外层的rv进行重绘。
+
+### swapAdapter
+setAdapter都很常用，同之处就在于setAdapter会直接清空rv上的所有缓存，而swapAdapter会将rv上的holder保存到pool中，google提供swapAdapter考虑到的一个应用场景应该是两个数据源有很大的相似部分的情况下，直接使用setAdapter充值的话会导致原本可以被复用的holder被全部清空，而使用swapAdapter代替setAdapter可以充分利用rv的缓存机制。
+
+### getAdapterPosition和getLayoutPosition
+大部分情况下调用这两个方法得到的结果是一致的，都是为了获得holder对应的position位置，但getAdapterPosition获取位置更为及时，而getLayoutPosition会滞后到下一帧才能得到正确的position，如果你想及时得到holder对应的position信息建议使用前者。<br>
+举个最简单的例子就是当调用完notifyItemRangeInserted在rv头部插入一个item后立即调用这两个方法获取下原先处于第一个位置的position就能立即看出区别，其实跟踪下
+```Java
+public int applyPendingUpdatesToPosition(int position) {
+    final int size = mPendingUpdates.size();
+    for (int i = 0; i < size; i++) {
+        UpdateOp op = mPendingUpdates.get(i);
+        switch (op.cmd) {
+            case UpdateOp.ADD:
+                if (op.positionStart <= position) {
+                    position += op.itemCount;
+                }
+                break;
+            case UpdateOp.REMOVE:
+                if (op.positionStart <= position) {
+                    final int end = op.positionStart + op.itemCount;
+                    if (end > position) {
+                        return RecyclerView.NO_POSITION;
+                    }
+                    position -= op.itemCount;
+                }
+                break;
+            case UpdateOp.MOVE:
+                if (op.positionStart == position) {
+                    position = op.itemCount; //position end
+                } else {
+                    if (op.positionStart < position) {
+                        position -= 1;
+                    }
+                    if (op.itemCount <= position) {
+                        position += 1;
+                    }
+                }
+                break;
+        }
+    }
+    return position;
+}
+
+```
+
+最终getAdapterPosition会进入到上述方法，在这个方法就能很清楚看出为什么getAdapterPosition总是能及时反应出position的正确位置。但是有一点需要注意的就是getAdapterPosition可能会返回-1
+```Java
+if (viewHolder.hasAnyOfTheFlags(ViewHolder.FLAG_INVALID
+        | ViewHolder.FLAG_REMOVED | ViewHolder.FLAG_ADAPTER_POSITION_UNKNOWN)
+        || !viewHolder.isBound()) {
+    return RecyclerView.NO_POSITION;
+}
+```
+这点需要特别留意，做好预防处理。
+
+### removeView和detachView
+这两个方法在rv进行排布item的时候会遇到，removeview就是大家很常见的操作，但是detachview就不太常见了，其实removeview是一个更为彻底的移除view操作，内部是会调用到detachview的，并且会调用到我们很熟悉的ondetachfromwindow方法，而detachview是一个轻量级的操作，内部操作就是简单的将该view从父view中移除掉，rv内部调用detachview的场景就是对应被移除的view可能在近期还会被使用到所以采用轻量级的移除操作，removeview一般都预示着这个holder已经彻底从屏幕消失不可见了。
 
 
 
